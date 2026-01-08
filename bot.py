@@ -1,19 +1,20 @@
 import re
-import time
 import asyncio
 from datetime import datetime
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import SessionPasswordNeeded, FloodWait
+
 from pymongo import MongoClient
 
-# ============ CONFIG (DIRECT ENV INSIDE BOT) ============
+# ============ CONFIG =================
 BOT_TOKEN = "7802838001:AAHhK3IohejoIOmOI5Skf2C5JrvmKGYfnFs"
 API_ID = 6435225
 API_HASH = "4e984ea35f854762dcde906dce426c2d"
 
 MONGO_URI = "mongodb+srv://teamdaxx123:teamdaxx123@cluster0.ysbpgcp.mongodb.net/?retryWrites=true&w=majority"
-# ======================================================
+# ====================================
 
 mongo = MongoClient(MONGO_URI)
 db = mongo.otp_panel
@@ -41,7 +42,7 @@ async def start(_, m):
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
-# ================= CALLBACK =================
+# ================= CALLBACKS =================
 @bot.on_callback_query()
 async def callbacks(_, q):
     uid = q.from_user.id
@@ -49,23 +50,22 @@ async def callbacks(_, q):
     # ADD ACCOUNT
     if q.data == "add":
         user_state[uid] = {"step": "phone"}
-        await q.message.reply("📱 Send phone number\nExample: +919xxxxxxxxx")
+        await q.message.reply(
+            "📱 **Send phone number**\nExample: +919XXXXXXXXX\n\n"
+            "⚠️ OTP Telegram app ke service chat me aayega"
+        )
 
     # LIST ACCOUNTS
-    if q.data == "accounts":
+    elif q.data == "accounts":
         accounts = list(accounts_col.find({"user_id": uid}))
         if not accounts:
             await q.message.reply("❌ No accounts found")
             return
 
-        buttons = []
-        for acc in accounts:
-            buttons.append([
-                InlineKeyboardButton(
-                    f"📱 {acc['phone']}",
-                    callback_data=f"open_{acc['phone']}"
-                )
-            ])
+        buttons = [
+            [InlineKeyboardButton(f"📱 {acc['phone']}", callback_data=f"open_{acc['phone']}")]
+            for acc in accounts
+        ]
 
         await q.message.reply(
             f"📂 **Total Accounts:** {len(accounts)}",
@@ -73,7 +73,7 @@ async def callbacks(_, q):
         )
 
     # OPEN ACCOUNT
-    if q.data.startswith("open_"):
+    elif q.data.startswith("open_"):
         phone = q.data.split("_", 1)[1]
         kb = [
             [InlineKeyboardButton("📩 Get OTP", callback_data=f"otp_{phone}")],
@@ -85,7 +85,7 @@ async def callbacks(_, q):
         )
 
     # LOGOUT
-    if q.data.startswith("logout_"):
+    elif q.data.startswith("logout_"):
         phone = q.data.split("_", 1)[1]
         acc = accounts_col.find_one({"user_id": uid, "phone": phone})
 
@@ -94,7 +94,7 @@ async def callbacks(_, q):
             return
 
         client = Client(
-            ":memory:",
+            "logout_session",
             api_id=API_ID,
             api_hash=API_HASH,
             session_string=acc["session"]
@@ -111,7 +111,7 @@ async def callbacks(_, q):
         await q.message.reply(f"🚪 Logged out `{phone}`")
 
     # GET OTP
-    if q.data.startswith("otp_"):
+    elif q.data.startswith("otp_"):
         phone = q.data.split("_", 1)[1]
         acc = accounts_col.find_one({"user_id": uid, "phone": phone})
 
@@ -120,7 +120,7 @@ async def callbacks(_, q):
             return
 
         client = Client(
-            ":memory:",
+            "otp_fetch",
             api_id=API_ID,
             api_hash=API_HASH,
             session_string=acc["session"]
@@ -131,16 +131,18 @@ async def callbacks(_, q):
         await client.stop()
 
         if not otp:
-            await q.message.reply("❌ No OTP found")
+            await q.message.reply(
+                "❌ **No OTP found**\n\n"
+                "➡️ Telegram app khol ke check karo\n"
+                "➡️ Service / Archived chat"
+            )
             return
 
-        kb = [[InlineKeyboardButton("🚪 Logout", callback_data=f"logout_{phone}")]]
         await q.message.reply(
             f"✅ **Latest OTP**\n\n"
             f"📱 `{phone}`\n"
             f"🔢 OTP: `{otp}`\n"
-            f"🔐 2-Step: `{acc['two_step']}`",
-            reply_markup=InlineKeyboardMarkup(kb)
+            f"🔐 2-Step Enabled: `{acc['two_step']}`"
         )
 
 # ================= TEXT HANDLER =================
@@ -152,12 +154,28 @@ async def text_handler(_, m):
 
     step = user_state[uid]["step"]
 
-    # PHONE
+    # PHONE STEP
     if step == "phone":
         phone = m.text.strip()
-        client = Client(":memory:", api_id=API_ID, api_hash=API_HASH)
+
+        client = Client(
+            f"login_{uid}",
+            api_id=API_ID,
+            api_hash=API_HASH
+        )
+
         await client.connect()
-        sent = await client.send_code(phone)
+
+        try:
+            sent = await client.send_code(phone)
+        except FloodWait as e:
+            await m.reply(f"⏳ Flood wait: wait {e.value} seconds")
+            await client.disconnect()
+            return
+        except Exception as e:
+            await m.reply(f"❌ Failed to send OTP\n`{e}`")
+            await client.disconnect()
+            return
 
         temp_clients[uid] = client
         user_state[uid] = {
@@ -165,9 +183,14 @@ async def text_handler(_, m):
             "phone": phone,
             "hash": sent.phone_code_hash
         }
-        await m.reply("📩 OTP sent, send OTP")
 
-    # OTP
+        await m.reply(
+            "📩 **OTP Sent Successfully**\n\n"
+            "⚠️ Telegram app me OTP aayega\n"
+            "📥 Service / Archived chat check karo"
+        )
+
+    # OTP STEP
     elif step == "otp":
         data = user_state[uid]
         client = temp_clients[uid]
@@ -175,28 +198,28 @@ async def text_handler(_, m):
         try:
             await client.sign_in(
                 phone_number=data["phone"],
-                phone_code=m.text,
+                phone_code=m.text.strip(),
                 phone_code_hash=data["hash"]
             )
             two_step = False
 
         except SessionPasswordNeeded:
             user_state[uid]["step"] = "password"
-            await m.reply("🔐 Send 2-step password")
+            await m.reply("🔐 **Send 2-step password**")
             return
 
         await save_account(uid, data["phone"], client, two_step)
-        await m.reply("✅ Account added")
+        await m.reply("✅ **Account added successfully**")
         cleanup(uid)
 
-    # PASSWORD
+    # PASSWORD STEP
     elif step == "password":
         data = user_state[uid]
         client = temp_clients[uid]
-        await client.check_password(m.text)
 
+        await client.check_password(m.text.strip())
         await save_account(uid, data["phone"], client, True)
-        await m.reply("✅ Account added")
+        await m.reply("✅ **Account added successfully**")
         cleanup(uid)
 
 # ================= HELPERS =================
@@ -217,11 +240,11 @@ def cleanup(uid):
 
 async def fetch_latest_otp(client):
     pattern = r"\b\d{5}\b"
-    async for msg in client.get_chat_history("Telegram", limit=15):
+    async for msg in client.get_chat_history(777000, limit=20):
         if msg.text:
-            match = re.search(pattern, msg.text)
-            if match:
-                return match.group()
+            m = re.search(pattern, msg.text)
+            if m:
+                return m.group()
     return None
 
 # ================= RUN =================
