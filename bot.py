@@ -2665,9 +2665,11 @@ if __name__ == "__main__":
     logger.info(f"Referral Commission: {REFERRAL_COMMISSION}%")
     
     # Start background payment checker (ONLY ONCE)
-    global payment_checker_started
     if not payment_checker_started:
-        payment_checker_thread = threading.Thread(target=check_pending_payments, daemon=True)
+        payment_checker_thread = threading.Thread(
+            target=check_pending_payments,
+            daemon=True
+        )
         payment_checker_thread.start()
         payment_checker_started = True
         logger.info("✅ Payment checker thread started (only once)")
@@ -2678,3 +2680,4 @@ if __name__ == "__main__":
         logger.error(f"Bot error: {e}")
         time.sleep(30)
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
