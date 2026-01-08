@@ -83,25 +83,14 @@ referral_data = {}
 # Pyrogram login states
 login_states = {}  # Format: {user_id: {"step": "phone", "client": client_obj, ...}}
 
-# Import account management functions
+# Import account management
 try:
-    from account import (
-        AsyncManager, PyrogramClientManager,
-        pyrogram_login_flow_sync, verify_otp_and_save_sync,
-        verify_2fa_password_sync, logout_session_sync,
-        otp_searcher, continuous_otp_monitor
-    )
-    
-    # Initialize managers
-    async_manager = AsyncManager()
-    pyrogram_manager = PyrogramClientManager()
-    
-    logger.info("✅ Account module loaded successfully")
+    from account import AccountManager
+    account_manager = AccountManager(GLOBAL_API_ID, GLOBAL_API_HASH)
+    logger.info("✅ Account manager loaded successfully")
 except ImportError as e:
     logger.error(f"❌ Failed to load account module: {e}")
-    # Define fallback functions
-    async_manager = None
-    pyrogram_manager = None
+    account_manager = None
 
 # -----------------------
 # UTILITY FUNCTIONS
@@ -842,11 +831,11 @@ def handle_cancel_login(call):
         state = login_states[user_id]
         if "client" in state:
             try:
-                # Run async cleanup
-                if async_manager:
-                    async_manager.run_async(
-                        pyrogram_manager.cleanup_client(state["client"])
-                    )
+                # Cleanup client
+                from account import PyrogramClientManager
+                manager = PyrogramClientManager(GLOBAL_API_ID, GLOBAL_API_HASH)
+                import asyncio
+                asyncio.run(manager.safe_disconnect(state["client"]))
             except:
                 pass
     
@@ -862,11 +851,13 @@ def handle_cancel_login(call):
 def handle_logout_session(user_id, session_id, chat_id, callback_id):
     """Handle user logout from session"""
     try:
-        if not async_manager:
+        if not account_manager:
             bot.answer_callback_query(callback_id, "❌ Account module not loaded", show_alert=True)
             return
             
-        success, message = logout_session_sync(session_id, user_id)
+        success, message = account_manager.logout_session_sync(
+            session_id, user_id, otp_sessions_col, accounts_col, orders_col
+        )
         
         if success:
             bot.answer_callback_query(callback_id, "✅ Logged out successfully!", show_alert=True)
@@ -906,8 +897,8 @@ def handle_login_flow_messages(msg):
             bot.send_message(chat_id, "❌ Invalid phone number format. Please enter with country code:\nExample: +919876543210")
             return
         
-        # Check if account module is loaded
-        if not async_manager or not pyrogram_manager:
+        # Check if account manager is loaded
+        if not account_manager:
             bot.edit_message_text(
                 "❌ Account module not loaded. Please contact admin.",
                 chat_id,
@@ -916,9 +907,11 @@ def handle_login_flow_messages(msg):
             login_states.pop(user_id, None)
             return
         
-        # Start Pyrogram login flow using sync wrapper
+        # Start Pyrogram login flow using account manager
         try:
-            success, message = pyrogram_login_flow_sync(user_id, phone, chat_id, message_id)
+            success, message = account_manager.pyrogram_login_flow_sync(
+                login_states, accounts_col, user_id, phone, chat_id, message_id, state["country"]
+            )
             
             if success:
                 bot.edit_message_text(
@@ -954,8 +947,8 @@ def handle_login_flow_messages(msg):
             bot.send_message(chat_id, "❌ Invalid OTP format. Please enter 5-digit OTP:")
             return
         
-        # Check if account module is loaded
-        if not async_manager or not pyrogram_manager:
+        # Check if account manager is loaded
+        if not account_manager:
             bot.edit_message_text(
                 "❌ Account module not loaded. Please contact admin.",
                 chat_id,
@@ -965,7 +958,9 @@ def handle_login_flow_messages(msg):
             return
         
         try:
-            success, message = verify_otp_and_save_sync(user_id, otp)
+            success, message = account_manager.verify_otp_and_save_sync(
+                login_states, accounts_col, user_id, otp
+            )
             
             if success:
                 # Account added successfully
@@ -1021,8 +1016,8 @@ def handle_login_flow_messages(msg):
             bot.send_message(chat_id, "❌ Password cannot be empty. Enter 2FA password:")
             return
         
-        # Check if account module is loaded
-        if not async_manager or not pyrogram_manager:
+        # Check if account manager is loaded
+        if not account_manager:
             bot.edit_message_text(
                 "❌ Account module not loaded. Please contact admin.",
                 chat_id,
@@ -1032,7 +1027,9 @@ def handle_login_flow_messages(msg):
             return
         
         try:
-            success, message = verify_2fa_password_sync(user_id, password)
+            success, message = account_manager.verify_2fa_password_sync(
+                login_states, accounts_col, user_id, password
+            )
             
             if success:
                 # Account added successfully with 2FA
