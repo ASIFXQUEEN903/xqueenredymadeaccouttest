@@ -90,27 +90,22 @@ login_states = {}  # Format: {user_id: {"step": "phone", "client": client_obj, .
 class AsyncManager:
     """Manages async operations in sync context"""
     def __init__(self):
-        self.loop = None
         self.lock = threading.Lock()
         
     def run_async(self, coro):
         """Run async coroutine from sync context"""
         try:
-            # Try to get existing event loop
+            # Get or create event loop
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
+                # If loop is running, we need to run in thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(lambda: asyncio.run(coro))
+                    return future.result(timeout=30)
             except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            # Run the coroutine
-            if loop.is_running():
-                # If loop is running, schedule the task
-                future = asyncio.run_coroutine_threadsafe(coro, loop)
-                return future.result(timeout=30)
-            else:
-                # Run in current loop
-                return loop.run_until_complete(coro)
+                # No running loop, create new one
+                return asyncio.run(coro)
                 
         except Exception as e:
             logger.error(f"Async operation failed: {e}")
@@ -119,39 +114,44 @@ class AsyncManager:
 async_manager = AsyncManager()
 
 # -----------------------
-# PYROGRAM CLIENT MANAGER (FIXED)
+# SIMPLIFIED PYROGRAM CLIENT MANAGER
 # -----------------------
 class PyrogramClientManager:
-    """Thread-safe Pyrogram client management"""
+    """Simplified Pyrogram client management"""
     def __init__(self):
-        self.clients = {}
         self.lock = threading.Lock()
         
-    async def create_client(self, session_string=None, name=None):
+    async def create_client(self, session_string=None):
         """Create a Pyrogram client"""
-        if name is None:
-            name = f"client_{int(time.time())}"
-            
+        client_name = f"client_{int(time.time())}"
+        
         client = Client(
-            name=name,
+            name=client_name,
             session_string=session_string,
             api_id=GLOBAL_API_ID,
             api_hash=GLOBAL_API_HASH,
-            in_memory=True
+            in_memory=True,
+            no_updates=True  # Disable updates to reduce load
         )
         
-        await client.connect()
-        
-        with self.lock:
-            self.clients[name] = {
-                'client': client,
-                'created_at': datetime.utcnow()
-            }
-            
         return client
     
+    async def send_code(self, client, phone_number):
+        """Send verification code"""
+        try:
+            await client.connect()
+            sent_code = await client.send_code(phone_number)
+            return True, sent_code.phone_code_hash, None
+        except FloodWait as e:
+            return False, None, f"FloodWait: Please wait {e.value} seconds"
+        except Exception as e:
+            return False, None, str(e)
+        finally:
+            # Don't disconnect here, keep connection for OTP verification
+            pass
+    
     async def sign_in_with_otp(self, client, phone_number, phone_code_hash, otp_code):
-        """Sign in with OTP (handles 2FA)"""
+        """Sign in with OTP"""
         try:
             await client.sign_in(
                 phone_number=phone_number,
@@ -174,22 +174,22 @@ class PyrogramClientManager:
     
     async def get_session_string(self, client):
         """Get session string from authorized client"""
-        if await client.is_user_authorized():
-            return await client.export_session_string()
-        return None
+        try:
+            if await client.is_user_authorized():
+                return await client.export_session_string()
+            return None
+        except Exception as e:
+            logger.error(f"Error getting session string: {e}")
+            return None
     
-    async def cleanup_client(self, client_name):
+    async def cleanup_client(self, client):
         """Cleanup client properly"""
-        with self.lock:
-            if client_name in self.clients:
-                client_data = self.clients.pop(client_name)
-                try:
-                    client = client_data['client']
-                    if client.is_connected:
-                        await client.disconnect()
-                    logger.info(f"Cleaned up client: {client_name}")
-                except Exception as e:
-                    logger.error(f"Error cleaning up client {client_name}: {e}")
+        try:
+            if client.is_connected:
+                await client.disconnect()
+            logger.info(f"Cleaned up client: {client.name}")
+        except Exception as e:
+            logger.error(f"Error cleaning up client: {e}")
 
 pyrogram_manager = PyrogramClientManager()
 
@@ -487,18 +487,14 @@ def check_pending_payments():
             time.sleep(60)
 
 # -----------------------
-# FIXED OTP SEARCHER FUNCTION
+# SIMPLIFIED OTP SEARCHER FUNCTION
 # -----------------------
 async def otp_searcher(session_string):
-    """Search for OTP in Telegram messages - returns list of all OTPs found"""
+    """Search for OTP in Telegram messages"""
     client = None
     try:
-        # Create client with unique name
-        client_name = f"otp_searcher_{int(time.time())}"
-        client = await pyrogram_manager.create_client(
-            session_string=session_string,
-            name=client_name
-        )
+        client = await pyrogram_manager.create_client(session_string)
+        await client.connect()
         
         otp_codes = []
         
@@ -513,29 +509,17 @@ async def otp_searcher(session_string):
                             otp_codes.append(match)
                             logger.info(f"OTP found in Telegram chat: {match}")
             
-            # If not found, check 777000
-            if not otp_codes:
-                async for message in client.get_chat_history(777000, limit=20):
-                    if message.text and any(keyword in message.text.lower() for keyword in ["code", "login", "verification"]):
-                        pattern = r'\b\d{5}\b'
-                        matches = re.findall(pattern, message.text)
-                        for match in matches:
-                            if match not in otp_codes:
-                                otp_codes.append(match)
-                                logger.info(f"OTP found from 777000: {match}")
-            
         except Exception as e:
             logger.error(f"Error searching OTP: {e}")
         
-        # Cleanup client
-        await pyrogram_manager.cleanup_client(client_name)
+        await pyrogram_manager.cleanup_client(client)
         
         return otp_codes if otp_codes else []
         
     except Exception as e:
         logger.error(f"OTP searcher error: {e}")
-        if client and client.name:
-            await pyrogram_manager.cleanup_client(client.name)
+        if client:
+            await pyrogram_manager.cleanup_client(client)
         return []
 
 async def continuous_otp_monitor(session_string, user_id, phone, session_id, max_wait_time=1800):
@@ -609,33 +593,25 @@ async def pyrogram_login_flow_async(user_id, phone_number, chat_id, message_id):
     """Async Pyrogram login flow for adding accounts"""
     try:
         # Create client
-        client_name = f"login_{user_id}_{int(time.time())}"
-        client = await pyrogram_manager.create_client(name=client_name)
+        client = await pyrogram_manager.create_client()
         
         # Send code
-        try:
-            sent_code = await client.send_code(phone_number)
+        success, phone_code_hash, error = await pyrogram_manager.send_code(client, phone_number)
+        
+        if success:
             login_states[user_id] = {
                 "step": "waiting_otp",
                 "phone": phone_number,
-                "phone_code_hash": sent_code.phone_code_hash,
-                "client_name": client_name,
+                "phone_code_hash": phone_code_hash,
+                "client": client,
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "country": login_states[user_id]["country"]
             }
-            
-            return True
-            
-        except FloodWait as e:
-            await pyrogram_manager.cleanup_client(client_name)
-            login_states.pop(user_id, None)
-            return False, f"FloodWait: Please wait {e.value} seconds"
-            
-        except Exception as e:
-            await pyrogram_manager.cleanup_client(client_name)
-            login_states.pop(user_id, None)
-            return False, str(e)
+            return True, "OTP sent successfully"
+        else:
+            await pyrogram_manager.cleanup_client(client)
+            return False, error or "Failed to send OTP"
             
     except Exception as e:
         logger.error(f"Pyrogram login error: {e}")
@@ -648,71 +624,63 @@ async def verify_otp_and_save_async(user_id, otp_code):
             return False, "Session expired"
         
         state = login_states[user_id]
-        client_name = state["client_name"]
+        client = state["client"]
         
-        # Create client again for verification
-        client = await pyrogram_manager.create_client(name=client_name)
+        # Try to sign in with OTP
+        success, status, error = await pyrogram_manager.sign_in_with_otp(
+            client,
+            state["phone"],
+            state["phone_code_hash"],
+            otp_code
+        )
         
-        try:
-            # Try to sign in with OTP
-            success, status, error = await pyrogram_manager.sign_in_with_otp(
-                client,
-                state["phone"],
-                state["phone_code_hash"],
-                otp_code
-            )
-            
-            if status == "password_required":
-                # 2FA required
-                login_states[user_id]["step"] = "waiting_password"
-                await pyrogram_manager.cleanup_client(client_name)
-                return False, "password_required"
-            
-            if not success:
-                await pyrogram_manager.cleanup_client(client_name)
-                login_states.pop(user_id, None)
-                return False, error or "OTP verification failed"
-            
-            # Get session string
-            session_string = await pyrogram_manager.get_session_string(client)
-            
-            if not session_string:
-                await pyrogram_manager.cleanup_client(client_name)
-                login_states.pop(user_id, None)
-                return False, "Failed to get session string"
-            
-            # Save account to database
-            account_data = {
-                "country": state["country"],
-                "phone": state["phone"],
-                "session_string": session_string,
-                "has_2fa": False,
-                "two_step_password": None,
-                "status": "active",
-                "used": False,
-                "created_at": datetime.utcnow(),
-                "created_by": user_id,
-                "api_id": GLOBAL_API_ID,
-                "api_hash": GLOBAL_API_HASH
-            }
-            
-            # Insert account
-            accounts_col.insert_one(account_data)
-            
-            # Cleanup
-            await pyrogram_manager.cleanup_client(client_name)
+        if status == "password_required":
+            # 2FA required
+            login_states[user_id]["step"] = "waiting_password"
+            return False, "password_required"
+        
+        if not success:
+            await pyrogram_manager.cleanup_client(client)
             login_states.pop(user_id, None)
-            
-            return True, "Account added successfully"
-                
-        except Exception as e:
-            logger.error(f"OTP verification error: {e}")
-            await pyrogram_manager.cleanup_client(client_name)
+            return False, error or "OTP verification failed"
+        
+        # Get session string
+        session_string = await pyrogram_manager.get_session_string(client)
+        
+        if not session_string:
+            await pyrogram_manager.cleanup_client(client)
             login_states.pop(user_id, None)
-            return False, str(e)
+            return False, "Failed to get session string"
+        
+        # Save account to database
+        account_data = {
+            "country": state["country"],
+            "phone": state["phone"],
+            "session_string": session_string,
+            "has_2fa": False,
+            "two_step_password": None,
+            "status": "active",
+            "used": False,
+            "created_at": datetime.utcnow(),
+            "created_by": user_id,
+            "api_id": GLOBAL_API_ID,
+            "api_hash": GLOBAL_API_HASH
+        }
+        
+        # Insert account
+        accounts_col.insert_one(account_data)
+        
+        # Cleanup
+        await pyrogram_manager.cleanup_client(client)
+        login_states.pop(user_id, None)
+        
+        return True, "Account added successfully"
             
     except Exception as e:
-        logger.error(f"Verify OTP error: {e}")
+        logger.error(f"OTP verification error: {e}")
+        if user_id in login_states and "client" in login_states[user_id]:
+            await pyrogram_manager.cleanup_client(login_states[user_id]["client"])
+        login_states.pop(user_id, None)
         return False, str(e)
 
 async def verify_2fa_password_async(user_id, password):
@@ -722,58 +690,52 @@ async def verify_2fa_password_async(user_id, password):
             return False, "Session expired"
         
         state = login_states[user_id]
-        client_name = state["client_name"]
+        client = state["client"]
         
-        # Create client
-        client = await pyrogram_manager.create_client(name=client_name)
+        # Check password
+        success, error = await pyrogram_manager.sign_in_with_password(client, password)
         
-        try:
-            # Check password
-            success, error = await pyrogram_manager.sign_in_with_password(client, password)
-            
-            if not success:
-                await pyrogram_manager.cleanup_client(client_name)
-                return False, error
-            
-            # Get session string
-            session_string = await pyrogram_manager.get_session_string(client)
-            
-            if not session_string:
-                await pyrogram_manager.cleanup_client(client_name)
-                login_states.pop(user_id, None)
-                return False, "Failed to get session string"
-            
-            # Save account to database
-            account_data = {
-                "country": state["country"],
-                "phone": state["phone"],
-                "session_string": session_string,
-                "has_2fa": True,
-                "two_step_password": password,
-                "status": "active",
-                "used": False,
-                "created_at": datetime.utcnow(),
-                "created_by": user_id,
-                "api_id": GLOBAL_API_ID,
-                "api_hash": GLOBAL_API_HASH
-            }
-            
-            # Insert account
-            accounts_col.insert_one(account_data)
-            
-            # Cleanup
-            await pyrogram_manager.cleanup_client(client_name)
+        if not success:
+            await pyrogram_manager.cleanup_client(client)
+            return False, error
+        
+        # Get session string
+        session_string = await pyrogram_manager.get_session_string(client)
+        
+        if not session_string:
+            await pyrogram_manager.cleanup_client(client)
             login_states.pop(user_id, None)
-            
-            return True, "Account added successfully"
-            
-        except Exception as e:
-            logger.error(f"2FA password error: {e}")
-            await pyrogram_manager.cleanup_client(client_name)
-            return False, str(e)
+            return False, "Failed to get session string"
+        
+        # Save account to database
+        account_data = {
+            "country": state["country"],
+            "phone": state["phone"],
+            "session_string": session_string,
+            "has_2fa": True,
+            "two_step_password": password,
+            "status": "active",
+            "used": False,
+            "created_at": datetime.utcnow(),
+            "created_by": user_id,
+            "api_id": GLOBAL_API_ID,
+            "api_hash": GLOBAL_API_HASH
+        }
+        
+        # Insert account
+        accounts_col.insert_one(account_data)
+        
+        # Cleanup
+        await pyrogram_manager.cleanup_client(client)
+        login_states.pop(user_id, None)
+        
+        return True, "Account added successfully"
             
     except Exception as e:
         logger.error(f"2FA verification error: {e}")
+        if user_id in login_states and "client" in login_states[user_id]:
+            await pyrogram_manager.cleanup_client(login_states[user_id]["client"])
+        login_states.pop(user_id, None)
         return False, str(e)
 
 async def logout_session_async(session_id, user_id):
@@ -790,11 +752,8 @@ async def logout_session_async(session_id, user_id):
             return False, "Account not found"
         
         # Create client and logout
-        client_name = f"logout_{session_id}"
-        client = await pyrogram_manager.create_client(
-            session_string=account["session_string"],
-            name=client_name
-        )
+        client = await pyrogram_manager.create_client(account["session_string"])
+        await client.connect()
         
         # Check if authorized
         if await client.is_user_authorized():
@@ -802,7 +761,7 @@ async def logout_session_async(session_id, user_id):
             logger.info(f"User {user_id} logged out from session {session_id}")
         
         # Cleanup
-        await pyrogram_manager.cleanup_client(client_name)
+        await pyrogram_manager.cleanup_client(client)
         
         # Update session status
         otp_sessions_col.update_one(
@@ -1317,11 +1276,11 @@ def handle_cancel_login(call):
     # Cleanup any active client
     if user_id in login_states:
         state = login_states[user_id]
-        if "client_name" in state:
+        if "client" in state:
             try:
                 # Run async cleanup
                 async_manager.run_async(
-                    pyrogram_manager.cleanup_client(state["client_name"])
+                    pyrogram_manager.cleanup_client(state["client"])
                 )
             except:
                 pass
@@ -2550,12 +2509,7 @@ def process_purchase(user_id, account_id, chat_id, message_id, callback_id):
             # Run async OTP monitoring in a thread
             def start_otp_monitoring_thread():
                 try:
-                    # Create new event loop for this thread
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    
-                    # Run the monitoring
-                    loop.run_until_complete(
+                    asyncio.run(
                         continuous_otp_monitor(
                             account['session_string'],
                             user_id,
@@ -2564,7 +2518,6 @@ def process_purchase(user_id, account_id, chat_id, message_id, callback_id):
                             1800
                         )
                     )
-                    loop.close()
                 except Exception as e:
                     logger.error(f"OTP monitoring thread error: {e}")
             
