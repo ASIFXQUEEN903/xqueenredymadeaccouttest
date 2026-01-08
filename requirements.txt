@@ -1,6 +1,4 @@
-pyTelegramBotAPI
-pymongo
-dnspython
-requests
-pyrogram
-tgcrypto
+pyrogram==2.0.106
+telebot==0.0.5
+pymongo==4.6.0
+requests==2.31.0
