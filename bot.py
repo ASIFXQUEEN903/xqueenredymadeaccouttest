@@ -180,8 +180,10 @@ def get_all_countries():
     return list(countries_col.find({"status": "active"}))
 
 def get_country_by_name(country_name):
-    """Get country details by name"""
-    return countries_col.find_one({"name": country_name, "status": "active"})
+    return countries_col.find_one({
+        "name": {"$regex": f"^{country_name}$", "$options": "i"},
+        "status": "active"
+    })
 
 def add_referral_commission(referrer_id, recharge_amount, recharge_id):
     """Add commission to referrer when referred user recharges"""
