@@ -289,7 +289,7 @@ async def verify_otp_and_save_async(login_states, accounts_col, user_id, otp_cod
             "api_hash": api_hash
         }
         
-        # FIXED: Check if accounts_col is not None using proper comparison
+        # Insert account - FIXED: Check if accounts_col is not None
         if accounts_col is not None:
             result = accounts_col.insert_one(account_data)
             logger.info(f"Account saved to database with ID: {result.inserted_id}")
@@ -356,7 +356,7 @@ async def verify_2fa_password_async(login_states, accounts_col, user_id, passwor
             "api_hash": api_hash
         }
         
-        # FIXED: Check if accounts_col is not None using proper comparison
+        # Insert account - FIXED: Check if accounts_col is not None
         if accounts_col is not None:
             result = accounts_col.insert_one(account_data)
             logger.info(f"2FA Account saved to database with ID: {result.inserted_id}")
@@ -664,6 +664,27 @@ async def logout_session_async(session_id, user_id, otp_sessions_col, accounts_c
         return False, str(e)
 
 # -----------------------
+# SIMPLE OTP MONITORING (NON-AUTOMATIC)
+# -----------------------
+async def simple_otp_monitor(session_string, session_id, max_wait_time=1800, api_id=6435225, api_hash="4e984ea35f854762dcde906dce426c2d"):
+    """Simple OTP monitoring without automatic notifications"""
+    start_time = time.time()
+    
+    logger.info(f"Simple OTP monitoring started for session {session_id}")
+    
+    while time.time() - start_time < max_wait_time:
+        try:
+            # Just keep the session alive, don't search for OTP automatically
+            await asyncio.sleep(10)
+            
+        except Exception as e:
+            logger.error(f"Simple monitor error: {e}")
+            await asyncio.sleep(10)
+    
+    logger.info(f"Simple OTP monitoring ended for session {session_id}")
+    return None
+
+# -----------------------
 # SYNC WRAPPERS FOR ASYNC FUNCTIONS
 # -----------------------
 class AccountManager:
@@ -736,6 +757,16 @@ class AccountManager:
         except Exception as e:
             logger.error(f"Logout error: {e}")
             return False, str(e)
+    
+    def start_simple_monitoring_sync(self, session_string, session_id, max_wait_time=1800):
+        """Start simple monitoring (session keep-alive only)"""
+        try:
+            return self.async_manager.run_async(
+                simple_otp_monitor(session_string, session_id, max_wait_time, self.api_id, self.api_hash)
+            )
+        except Exception as e:
+            logger.error(f"Simple monitoring error: {e}")
+            return None
 
 # -----------------------
 # MAIN OTP MONITORING FUNCTION (USED BY BOT) - FIXED
@@ -743,12 +774,12 @@ class AccountManager:
 async def continuous_otp_monitor(session_string, user_id, phone, session_id, max_wait_time=1800, 
                                  api_id=6435225, api_hash="4e984ea35f854762dcde906dce426c2d", 
                                  bot=None, otp_sessions_col=None, accounts_col=None):
-    """Main OTP monitoring function called by bot"""
+    """Main OTP monitoring function called by bot - MODIFIED: NO AUTOMATIC NOTIFICATIONS"""
     try:
-        # Use real-time monitoring function
-        last_otp = await real_time_otp_monitor(
-            session_string, user_id, phone, session_id, max_wait_time,
-            api_id, api_hash, bot, otp_sessions_col, accounts_col
+        # Use simple monitoring instead of real-time monitoring
+        last_otp = await simple_otp_monitor(
+            session_string, session_id, max_wait_time,
+            api_id, api_hash
         )
         return [last_otp] if last_otp else []
     except Exception as e:
@@ -764,5 +795,6 @@ __all__ = [
     'continuous_otp_monitor',
     'get_latest_otp_async',
     'get_otp_from_database_async',
-    'logout_session_async'
+    'logout_session_async',
+    'simple_otp_monitor'
 ]
