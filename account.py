@@ -1,3 +1,4 @@
+account.py 
 """
 Account Management Module for OTP Bot
 Handles Pyrogram login, OTP verification, and session management
@@ -147,9 +148,18 @@ class PyrogramClientManager:
     async def get_session_string(self, client):
         """Get session string from authorized client"""
         try:
-            if await client.is_user_authorized():
-                return await client.export_session_string()
-            return None
+            # Connect first
+            await client.connect()
+            
+            # In Pyrogram v2, check authorization by getting "me"
+            try:
+                me = await client.get_me()
+                if me:
+                    session_string = await client.export_session_string()
+                    return session_string
+            except Exception as e:
+                logger.error(f"User not authorized: {e}")
+                return None
         except Exception as e:
             logger.error(f"Error getting session string: {e}")
             return None
@@ -195,7 +205,9 @@ async def pyrogram_login_flow_async(login_states, accounts_col, user_id, phone_n
                 "phone_code_hash": phone_code_hash,
                 "step": "waiting_otp",
                 "manager": manager,
-                "country": country
+                "country": country,
+                "api_id": api_id,
+                "api_hash": api_hash
             })
             return True, "OTP sent successfully"
         else:
@@ -218,7 +230,9 @@ async def verify_otp_and_save_async(login_states, accounts_col, user_id, otp_cod
             return False, "Client not found"
         
         client = state["client"]
-        manager = state.get("manager") or PyrogramClientManager(api_id=6435225, api_hash="4e984ea35f854762dcde906dce426c2d")
+        api_id = state.get("api_id", 6435225)
+        api_hash = state.get("api_hash", "4e984ea35f854762dcde906dce426c2d")
+        manager = state.get("manager") or PyrogramClientManager(api_id, api_hash)
         
         # Try to sign in with OTP
         success, status, error = await manager.sign_in_with_otp(
@@ -257,13 +271,14 @@ async def verify_otp_and_save_async(login_states, accounts_col, user_id, otp_cod
             "used": False,
             "created_at": datetime.utcnow(),
             "created_by": user_id,
-            "api_id": api_id if "api_id" in state else 6435225,
-            "api_hash": api_hash if "api_hash" in state else "4e984ea35f854762dcde906dce426c2d"
+            "api_id": api_id,
+            "api_hash": api_hash
         }
         
         # Insert account
         if accounts_col:
-            accounts_col.insert_one(account_data)
+            result = accounts_col.insert_one(account_data)
+            logger.info(f"Account saved to database with ID: {result.inserted_id}")
         
         # Cleanup
         await manager.safe_disconnect(client)
@@ -291,7 +306,9 @@ async def verify_2fa_password_async(login_states, accounts_col, user_id, passwor
             return False, "Client not found"
         
         client = state["client"]
-        manager = state.get("manager") or PyrogramClientManager(api_id=6435225, api_hash="4e984ea35f854762dcde906dce426c2d")
+        api_id = state.get("api_id", 6435225)
+        api_hash = state.get("api_hash", "4e984ea35f854762dcde906dce426c2d")
+        manager = state.get("manager") or PyrogramClientManager(api_id, api_hash)
         
         # Check password
         success, error = await manager.sign_in_with_password(client, password)
@@ -319,13 +336,14 @@ async def verify_2fa_password_async(login_states, accounts_col, user_id, passwor
             "used": False,
             "created_at": datetime.utcnow(),
             "created_by": user_id,
-            "api_id": api_id if "api_id" in state else 6435225,
-            "api_hash": api_hash if "api_hash" in state else "4e984ea35f854762dcde906dce426c2d"
+            "api_id": api_id,
+            "api_hash": api_hash
         }
         
         # Insert account
         if accounts_col:
-            accounts_col.insert_one(account_data)
+            result = accounts_col.insert_one(account_data)
+            logger.info(f"2FA Account saved to database with ID: {result.inserted_id}")
         
         # Cleanup
         await manager.safe_disconnect(client)
@@ -360,12 +378,16 @@ async def logout_session_async(session_id, user_id, otp_sessions_col, accounts_c
             api_hash=account.get("api_hash", "4e984ea35f854762dcde906dce426c2d")
         )
         client = await manager.create_client(account["session_string"])
-        await client.connect()
         
         # Check if authorized
-        if await client.is_user_authorized():
-            await client.log_out()
-            logger.info(f"User {user_id} logged out from session {session_id}")
+        try:
+            await client.connect()
+            me = await client.get_me()
+            if me:
+                await client.log_out()
+                logger.info(f"User {user_id} logged out from session {session_id}")
+        except Exception as e:
+            logger.error(f"Logout check failed: {e}")
         
         # Cleanup
         await manager.safe_disconnect(client)
@@ -430,77 +452,6 @@ async def otp_searcher(session_string, api_id=6435225, api_hash="4e984ea35f85476
         logger.error(f"OTP searcher error: {e}")
         return []
 
-async def continuous_otp_monitor(session_string, user_id, phone, session_id, max_wait_time=1800, 
-                                 api_id=6435225, api_hash="4e984ea35f854762dcde906dce426c2d", 
-                                 bot=None, otp_sessions_col=None):
-    """Monitor for multiple OTPs for 30 minutes"""
-    start_time = time.time()
-    all_otps_found = []
-    
-    while time.time() - start_time < max_wait_time:
-        try:
-            # Check if session is still active
-            if otp_sessions_col:
-                session_data = otp_sessions_col.find_one({"session_id": session_id})
-                if not session_data or session_data.get("status") == "completed":
-                    logger.info(f"OTP monitoring stopped for {phone} - session completed")
-                    break
-                
-            otp_codes = await otp_searcher(session_string, api_id, api_hash)
-            
-            # Send new OTPs to user
-            new_otps = [otp for otp in otp_codes if otp not in all_otps_found]
-            
-            for otp_code in new_otps:
-                all_otps_found.append(otp_code)
-                logger.info(f"New OTP found for {phone}: {otp_code}")
-                
-                if bot:
-                    try:
-                        # Create inline keyboard
-                        from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-                        
-                        markup = InlineKeyboardMarkup(row_width=2)
-                        markup.add(
-                            InlineKeyboardButton("✅ Complete Order", callback_data=f"complete_order_{session_id}"),
-                            InlineKeyboardButton("🚪 Logout", callback_data=f"logout_session_{session_id}")
-                        )
-                        
-                        bot.send_message(
-                            user_id,
-                            f"✅ **New OTP Received!**\n\n"
-                            f"📱 Phone: `{phone}`\n"
-                            f"🔢 OTP Code: `{otp_code}`\n\n"
-                            f"Enter this code in Telegram X app.\n"
-                            f"Click 'Complete Order' when done.",
-                            parse_mode="Markdown",
-                            reply_markup=markup
-                        )
-                        
-                        # Update session with latest OTP
-                        if otp_sessions_col:
-                            otp_sessions_col.update_one(
-                                {"session_id": session_id},
-                                {"$set": {
-                                    "status": "otp_delivered", 
-                                    "otp_code": otp_code,
-                                    "latest_otp_at": datetime.utcnow(),
-                                    "total_otps_received": len(all_otps_found)
-                                }}
-                            )
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to send OTP message: {e}")
-            
-            # Wait 8 seconds before checking again
-            await asyncio.sleep(8)
-            
-        except Exception as e:
-            logger.error(f"OTP monitor error: {e}")
-            await asyncio.sleep(8)
-    
-    return all_otps_found
-
 # -----------------------
 # SYNC WRAPPERS FOR ASYNC FUNCTIONS
 # -----------------------
@@ -554,30 +505,11 @@ class AccountManager:
         except Exception as e:
             logger.error(f"Logout error: {e}")
             return False, str(e)
-    
-    def start_otp_monitoring(self, session_string, user_id, phone, session_id, bot, otp_sessions_col, max_wait_time=1800):
-        """Start OTP monitoring in background thread"""
-        def monitor_wrapper():
-            try:
-                self.async_manager.run_async(
-                    continuous_otp_monitor(
-                        session_string, user_id, phone, session_id, max_wait_time,
-                        self.api_id, self.api_hash, bot, otp_sessions_col
-                    )
-                )
-            except Exception as e:
-                logger.error(f"OTP monitoring thread error: {e}")
-        
-        # Start thread
-        thread = threading.Thread(target=monitor_wrapper, daemon=True)
-        thread.start()
-        return thread
 
 # Export everything
 __all__ = [
     'AsyncManager',
     'PyrogramClientManager',
     'AccountManager',
-    'otp_searcher',
-    'continuous_otp_monitor'
+    'otp_searcher'
 ]
