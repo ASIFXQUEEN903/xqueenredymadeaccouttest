@@ -945,22 +945,55 @@ def handle_logout_session(user_id, session_id, chat_id, callback_id):
 def get_latest_otp(user_id, session_id, chat_id, callback_id):
     """Get the latest OTP for a session"""
     try:
-        # Find the session
-        session_data = otp_sessions_col.find_one({"session_id": session_id})
-        if not session_data:
-            bot.answer_callback_query(callback_id, "❌ Session not found", show_alert=True)
+        # सबसे पहले database से OTP fetch करें
+        if not account_manager:
+            bot.answer_callback_query(callback_id, "❌ Account module not loaded", show_alert=True)
             return
         
-        otp_code = session_data.get("otp_code")
-        two_step_password = session_data.get("two_step_password")
+        # Database से direct fetch करें
+        otp_code = account_manager.get_otp_from_database_sync(session_id, otp_sessions_col)
         
         if not otp_code:
-            bot.answer_callback_query(callback_id, "❌ No OTP received yet", show_alert=True)
-            return
+            # अगर database में नहीं है, तो session से fetch करें
+            bot.answer_callback_query(callback_id, "🔄 Searching for latest OTP...", show_alert=False)
+            
+            # Session से OTP fetch करें
+            session_data = otp_sessions_col.find_one({"session_id": session_id})
+            if not session_data:
+                bot.answer_callback_query(callback_id, "❌ Session not found", show_alert=True)
+                return
+            
+            session_string = session_data.get("session_string")
+            if session_string:
+                otp_code = account_manager.get_latest_otp_sync(session_string)
+                
+                if otp_code:
+                    # Database में save करें
+                    otp_sessions_col.update_one(
+                        {"session_id": session_id},
+                        {"$set": {
+                            "otp_code": otp_code,
+                            "latest_otp_at": datetime.utcnow()
+                        }}
+                    )
+                else:
+                    bot.answer_callback_query(callback_id, "❌ No OTP received yet", show_alert=True)
+                    return
+            else:
+                bot.answer_callback_query(callback_id, "❌ No session string found", show_alert=True)
+                return
         
-        # Get account details
-        account_id = session_data.get("account_id")
-        account = accounts_col.find_one({"_id": ObjectId(account_id)}) if account_id else None
+        # OTP मिल गया है, अब message बनाएं
+        session_data = otp_sessions_col.find_one({"session_id": session_id})
+        two_step_password = session_data.get("two_step_password") if session_data else ""
+        
+        # Account से 2FA password fetch करें
+        if not two_step_password:
+            account_id = session_data.get("account_id")
+            if account_id:
+                account = accounts_col.find_one({"_id": ObjectId(account_id)})
+                if account and account.get("two_step_password"):
+                    two_step_password = account.get("two_step_password")
         
         message = f"✅ **Latest OTP Received**\n\n"
         message += f"📱 Phone: `{session_data.get('phone', 'N/A')}`\n"
@@ -968,8 +1001,6 @@ def get_latest_otp(user_id, session_id, chat_id, callback_id):
         
         if two_step_password:
             message += f"🔐 2FA Password: `{two_step_password}`\n"
-        elif account and account.get("two_step_password"):
-            message += f"🔐 2FA Password: `{account.get('two_step_password')}`\n"
         
         message += f"\nEnter this code in Telegram X app."
         
@@ -992,7 +1023,6 @@ def get_latest_otp(user_id, session_id, chat_id, callback_id):
     except Exception as e:
         logger.error(f"Get OTP error: {e}")
         bot.answer_callback_query(callback_id, "❌ Error getting OTP", show_alert=True)
-
 # -----------------------
 # MESSAGE HANDLER FOR LOGIN FLOW
 # -----------------------
