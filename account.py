@@ -466,6 +466,88 @@ async def otp_searcher(session_string, api_id=6435225, api_hash="4e984ea35f85476
         return None
 
 # -----------------------
+# LOGOUT SESSION FUNCTION (FIXED)
+# -----------------------
+async def logout_session_async(session_id, user_id, otp_sessions_col, accounts_col, orders_col):
+    """Logout from session and mark order as completed"""
+    try:
+        from bson import ObjectId
+        
+        # FIXED: Check if collections are not None
+        if otp_sessions_col is None:
+            return False, "otp_sessions_col is None"
+        
+        # Find session data
+        session_data = otp_sessions_col.find_one({"session_id": session_id})
+        if not session_data:
+            return False, "Session not found"
+        
+        # Check if user owns this session
+        if session_data.get("user_id") != user_id:
+            return False, "Not authorized to logout this session"
+        
+        # Update session status
+        otp_sessions_col.update_one(
+            {"session_id": session_id},
+            {"$set": {
+                "status": "completed",
+                "completed_at": datetime.utcnow(),
+                "completed_by_user": True
+            }}
+        )
+        
+        # FIXED: Update order status only if orders_col is not None
+        if orders_col is not None:
+            orders_col.update_one(
+                {"session_id": session_id},
+                {"$set": {
+                    "status": "completed",
+                    "completed_at": datetime.utcnow(),
+                    "user_completed": True
+                }}
+            )
+        
+        # FIXED: Mark account as used only if accounts_col is not None
+        account_id = session_data.get("account_id")
+        if account_id and accounts_col is not None:
+            try:
+                # mark account used
+                accounts_col.update_one(
+                    {"_id": ObjectId(account_id)},
+                    {"$set": {"used": True, "used_at": datetime.utcnow()}}
+                )
+            except:
+                pass
+
+            # 🔥 REAL TELEGRAM LOGOUT (CPython / Telegram X remove)
+            try:
+                account = accounts_col.find_one({"_id": ObjectId(account_id)})
+                if account and account.get("session_string"):
+                    tg_client = Client(
+                        name=f"logout_{session_id}",
+                        session_string=account["session_string"],
+                        api_id=int(account.get("api_id", 6435225)),
+                        api_hash=account.get("api_hash", "4e984ea35f854762dcde906dce426c2d"),
+                        in_memory=True,
+                        no_updates=True
+                    )
+
+                    await tg_client.connect()
+                    await tg_client.log_out()      # ✅ REAL LOGOUT
+                    await tg_client.disconnect()
+
+                    logger.info(f"Telegram account FORCE logged out for {account.get('phone')}")
+            except Exception as e:
+                logger.error(f"Telegram logout failed: {e}")
+        
+        logger.info(f"User {user_id} logged out from session {session_id}")
+        return True, "Logged out successfully from Telegram"
+        
+    except Exception as e:
+        logger.error(f"Logout error: {e}")
+        return False, str(e)
+
+# -----------------------
 # REAL-TIME OTP MONITORING FUNCTION (FIXED)
 # -----------------------
 async def real_time_otp_monitor(session_string, user_id, phone, session_id, max_wait_time=1800, 
@@ -602,84 +684,6 @@ async def get_otp_from_database_async(session_id, otp_sessions_col):
     except Exception as e:
         logger.error(f"Error getting OTP from database: {e}")
         return None
-
-# -----------------------
-# LOGOUT SESSION FUNCTION (FIXED)
-# -----------------------
-async def logout_session_async(session_id, user_id, otp_sessions_col, accounts_col, orders_col):
-    """Logout from session and mark order as completed"""
-    try:
-        from bson import ObjectId
-        
-        # FIXED: Check if collections are not None
-        if otp_sessions_col is None:
-            return False, "otp_sessions_col is None"
-        
-        # Find session data
-        session_data = otp_sessions_col.find_one({"session_id": session_id})
-        if not session_data:
-            return False, "Session not found"
-        
-        # Check if user owns this session
-        if session_data.get("user_id") != user_id:
-            return False, "Not authorized to logout this session"
-        
-        # Update session status
-        otp_sessions_col.update_one(
-            {"session_id": session_id},
-            {"$set": {
-                "status": "completed",
-                "completed_at": datetime.utcnow(),
-                "completed_by_user": True
-            }}
-        )
-        
-        # FIXED: Update order status only if orders_col is not None
-        if orders_col is not None:
-            orders_col.update_one(
-                {"session_id": session_id},
-                {"$set": {
-                    "status": "completed",
-                    "completed_at": datetime.utcnow(),
-                    "user_completed": True
-                }}
-            )
-        
-        # FIXED: Mark account as used only if accounts_col is not None
-account_id = session_data.get("account_id")
-
-if account_id and accounts_col is not None:
-    try:
-        # mark account used
-        accounts_col.update_one(
-            {"_id": ObjectId(account_id)},
-            {"$set": {"used": True, "used_at": datetime.utcnow()}}
-        )
-    except:
-        pass
-
-    # 🔥 REAL TELEGRAM LOGOUT (CPython / Telegram X remove)
-    try:
-        account = accounts_col.find_one({"_id": ObjectId(account_id)})
-        if account and account.get("session_string"):
-            from pyrogram import Client
-
-            tg_client = Client(
-                name=f"logout_{session_id}",
-                session_string=account["session_string"],
-                api_id=int(account.get("api_id", 6435225)),
-                api_hash=account.get("api_hash", "4e984ea35f854762dcde906dce426c2d"),
-                in_memory=True,
-                no_updates=True
-            )
-
-            await tg_client.connect()
-            await tg_client.log_out()      # ✅ REAL LOGOUT
-            await tg_client.disconnect()
-
-            logger.info(f"Telegram account FORCE logged out for {account.get('phone')}")
-    except Exception as e:
-        logger.error(f"Telegram logout failed: {e}")
 
 # -----------------------
 # SIMPLE OTP MONITORING (NON-AUTOMATIC)
