@@ -340,7 +340,11 @@ def handle_callbacks(call):
     
     try:
         if data == "buy_account":
-            show_countries(call.message.chat.id, call.message.message_id)
+            try:
+                bot.delete_message(call.message.chat.id, call.message.message_id)
+            except:
+                pass
+            show_countries(call.message.chat.id)
         
         elif data == "balance":
             balance = get_balance(user_id)
@@ -409,6 +413,10 @@ def handle_callbacks(call):
         
         elif data == "admin_panel":
             if is_admin(user_id):
+                try:
+                    bot.delete_message(call.message.chat.id, call.message.message_id)
+                except:
+                    pass
                 show_admin_panel(call.message.chat.id)
             else:
                 bot.answer_callback_query(call.id, "❌ Unauthorized", show_alert=True)
@@ -434,7 +442,11 @@ def handle_callbacks(call):
             get_latest_otp(user_id, session_id, call.message.chat.id, call.id)
         
         elif data == "back_to_countries":
-            show_countries(call.message.chat.id, call.message.message_id)
+            try:
+                bot.delete_message(call.message.chat.id, call.message.message_id)
+            except:
+                pass
+            show_countries(call.message.chat.id)
         
         elif data == "back_to_menu":
             try:
@@ -752,35 +764,37 @@ def show_country_details(user_id, country_name, chat_id, message_id, callback_id
         # Get available accounts
         accounts_count = get_available_accounts_count(country_name)
         
-        # Format message
-        text = f"""⚡ **Telegram Account Info**
+        # Format message with quote
+        text = f"""⚡ <b>Telegram Account Info</b>
 
-🌍 Country : {country_name}
+<blockquote>🌍 Country : {country_name}
 💸 Price : {format_currency(country['price'])}
 📦 Available : {accounts_count}
 
 🔍 Reliable | Affordable | Good Quality
 
 ⚠️ Use Telegram X only to login.
-🚫 Not responsible for freeze / ban."""
+🚫 Not responsible for freeze / ban.</blockquote>"""
         
-        markup = InlineKeyboardMarkup()
+        markup = InlineKeyboardMarkup(row_width=2)
+        
         if accounts_count > 0:
-            # Get a random available account
+            # Get all available accounts
             accounts = list(accounts_col.find({
                 "country": country_name,
                 "status": "active",
                 "used": False
             }))
-            if accounts:
-                account = random.choice(accounts)
-                markup.add(InlineKeyboardButton(
-                    "🛒 Buy Account",
-                    callback_data=f"buy_{account['_id']}"
-                ))
-        else:
+            
+            # Show Buy Account button
             markup.add(InlineKeyboardButton(
-                "❌ Out of Stock",
+                "🛒 Buy Account",
+                callback_data=f"buy_{accounts[0]['_id']}" if accounts else "out_of_stock"
+            ))
+        else:
+            # No accounts available
+            markup.add(InlineKeyboardButton(
+                "🛒 Buy Account",
                 callback_data="out_of_stock"
             ))
         
@@ -791,7 +805,7 @@ def show_country_details(user_id, country_name, chat_id, message_id, callback_id
                 text,
                 chat_id,
                 message_id,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=markup
             )
         except:
@@ -802,7 +816,7 @@ def show_country_details(user_id, country_name, chat_id, message_id, callback_id
             bot.send_message(
                 chat_id,
                 text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=markup
             )
     
@@ -1702,54 +1716,32 @@ def show_countries(chat_id, message_id=None):
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
         
-        if message_id:
-            try:
-                bot.edit_message_text(
-                    text,
-                    chat_id,
-                    message_id,
-                    reply_markup=markup,
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                try:
-                    bot.delete_message(chat_id, message_id)
-                except:
-                    pass
-                bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-        else:
-            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
         return
     
     text = "🌍 **Select Country**\n\nChoose your country:"
     markup = InlineKeyboardMarkup(row_width=2)
     
-    for country in countries:
-        markup.add(InlineKeyboardButton(
+    # Create buttons in 2x2 grid (4 countries per row)
+    row = []
+    for i, country in enumerate(countries):
+        row.append(InlineKeyboardButton(
             country['name'],
             callback_data=f"country_raw_{country['name']}"
         ))
+        
+        # Add 2 buttons per row
+        if len(row) == 2:
+            markup.add(*row)
+            row = []
+    
+    # Add any remaining buttons
+    if row:
+        markup.add(*row)
     
     markup.add(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
     
-    if message_id:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id,
-                message_id,
-                reply_markup=markup,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.error(f"Error editing message: {e}")
-            try:
-                bot.delete_message(chat_id, message_id)
-            except:
-                pass
-            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-    else:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
 # -----------------------
 # RECHARGE FUNCTIONS
@@ -1927,7 +1919,11 @@ def process_purchase(user_id, account_id, chat_id, message_id, callback_id):
         if account.get('used', False):
             bot.answer_callback_query(callback_id, "❌ Account already sold out", show_alert=True)
             # Go back to country selection
-            show_countries(chat_id, message_id)
+            try:
+                bot.delete_message(chat_id, message_id)
+            except:
+                pass
+            show_countries(chat_id)
             return
         
         # Get country price
