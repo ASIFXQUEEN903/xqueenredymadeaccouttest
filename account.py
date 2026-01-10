@@ -466,6 +466,107 @@ async def otp_searcher(session_string, api_id=6435225, api_hash="4e984ea35f85476
         return None
 
 # -----------------------
+# LOGOUT SESSION FUNCTION (FIXED)
+# -----------------------
+async def logout_session_async(session_id, user_id, otp_sessions_col, accounts_col, orders_col, session_string=None):
+    """Logout only the current session - SIMPLE VERSION"""
+    try:
+        from bson import ObjectId
+        
+        # Check if collections are not None
+        if otp_sessions_col is None:
+            return False, "Database error"
+        
+        # Find session data
+        session_data = otp_sessions_col.find_one({"session_id": session_id})
+        if not session_data:
+            return False, "Session not found"
+        
+        # Check if user owns this session
+        if session_data.get("user_id") != user_id:
+            return False, "Not authorized to logout this session"
+        
+        # Try to logout using session_string
+        logout_success = False
+        if session_string or session_data.get("session_string"):
+            client = None
+            try:
+                # Create client with session string
+                client = Client(
+                    name=f"logout_{session_id}",
+                    session_string=session_string or session_data.get("session_string"),
+                    api_id=6435225,
+                    api_hash="4e984ea35f854762dcde906dce426c2d",
+                    in_memory=True,
+                    no_updates=True,
+                    sleep_threshold=0
+                )
+                
+                await client.connect()
+                
+                # ONLY LOGOUT THIS SPECIFIC SESSION
+                try:
+                    await client.log_out()
+                    logger.info(f"Logged out current session: {session_id}")
+                    logout_success = True
+                except Exception as e:
+                    logger.warning(f"Could not logout via Pyrogram: {e}")
+                    # Even if logout fails, continue with database update
+                
+                # Disconnect client
+                if client:
+                    await client.disconnect()
+                
+            except Exception as e:
+                logger.error(f"Client logout error: {e}")
+                # Continue with database update even if client fails
+        
+        # Update session status in database
+        otp_sessions_col.update_one(
+            {"session_id": session_id},
+            {"$set": {
+                "status": "completed",
+                "completed_at": datetime.utcnow(),
+                "completed_by_user": True,
+                "logged_out": True,
+                "telegram_logout_success": logout_success
+            }}
+        )
+        
+        # Update order status
+        if orders_col is not None:
+            orders_col.update_one(
+                {"session_id": session_id},
+                {"$set": {
+                    "status": "completed",
+                    "completed_at": datetime.utcnow(),
+                    "user_completed": True
+                }}
+            )
+        
+        # Mark account as used
+        account_id = session_data.get("account_id")
+        if account_id and accounts_col is not None:
+            try:
+                accounts_col.update_one(
+                    {"_id": ObjectId(account_id)},
+                    {"$set": {
+                        "used": True, 
+                        "used_at": datetime.utcnow(),
+                        "last_used_by": user_id
+                    }}
+                )
+            except:
+                pass
+        
+        logger.info(f"User {user_id} completed session {session_id}")
+        return True, "Successfully logged out from current session"
+        
+    except Exception as e:
+        logger.error(f"Logout error: {e}")
+        return False, str(e)
+
+# -----------------------
 # REAL-TIME OTP MONITORING FUNCTION (FIXED)
 # -----------------------
 async def real_time_otp_monitor(session_string, user_id, phone, session_id, max_wait_time=1800, 
@@ -604,66 +705,6 @@ async def get_otp_from_database_async(session_id, otp_sessions_col):
         return None
 
 # -----------------------
-# LOGOUT SESSION FUNCTION (FIXED)
-# -----------------------
-async def logout_session_async(session_id, user_id, otp_sessions_col, accounts_col, orders_col):
-    """Logout from session and mark order as completed"""
-    try:
-        from bson import ObjectId
-        
-        # FIXED: Check if collections are not None
-        if otp_sessions_col is None:
-            return False, "otp_sessions_col is None"
-        
-        # Find session data
-        session_data = otp_sessions_col.find_one({"session_id": session_id})
-        if not session_data:
-            return False, "Session not found"
-        
-        # Check if user owns this session
-        if session_data.get("user_id") != user_id:
-            return False, "Not authorized to logout this session"
-        
-        # Update session status
-        otp_sessions_col.update_one(
-            {"session_id": session_id},
-            {"$set": {
-                "status": "completed",
-                "completed_at": datetime.utcnow(),
-                "completed_by_user": True
-            }}
-        )
-        
-        # FIXED: Update order status only if orders_col is not None
-        if orders_col is not None:
-            orders_col.update_one(
-                {"session_id": session_id},
-                {"$set": {
-                    "status": "completed",
-                    "completed_at": datetime.utcnow(),
-                    "user_completed": True
-                }}
-            )
-        
-        # FIXED: Mark account as used only if accounts_col is not None
-        account_id = session_data.get("account_id")
-        if account_id and accounts_col is not None:
-            try:
-                accounts_col.update_one(
-                    {"_id": ObjectId(account_id)},
-                    {"$set": {"used": True, "used_at": datetime.utcnow()}}
-                )
-            except:
-                pass
-        
-        logger.info(f"User {user_id} logged out from session {session_id}")
-        return True, "Logged out successfully"
-        
-    except Exception as e:
-        logger.error(f"Logout error: {e}")
-        return False, str(e)
-
-# -----------------------
 # SIMPLE OTP MONITORING (NON-AUTOMATIC)
 # -----------------------
 async def simple_otp_monitor(session_string, session_id, max_wait_time=1800, api_id=6435225, api_hash="4e984ea35f854762dcde906dce426c2d"):
@@ -683,6 +724,24 @@ async def simple_otp_monitor(session_string, session_id, max_wait_time=1800, api
     
     logger.info(f"Simple OTP monitoring ended for session {session_id}")
     return None
+
+# -----------------------
+# MAIN OTP MONITORING FUNCTION (USED BY BOT) - FIXED
+# -----------------------
+async def continuous_otp_monitor(session_string, user_id, phone, session_id, max_wait_time=1800, 
+                                 api_id=6435225, api_hash="4e984ea35f854762dcde906dce426c2d", 
+                                 bot=None, otp_sessions_col=None, accounts_col=None):
+    """Main OTP monitoring function called by bot - MODIFIED: NO AUTOMATIC NOTIFICATIONS"""
+    try:
+        # Use simple monitoring instead of real-time monitoring
+        last_otp = await simple_otp_monitor(
+            session_string, session_id, max_wait_time,
+            api_id, api_hash
+        )
+        return [last_otp] if last_otp else []
+    except Exception as e:
+        logger.error(f"Continuous OTP monitor error: {e}")
+        return []
 
 # -----------------------
 # SYNC WRAPPERS FOR ASYNC FUNCTIONS
@@ -748,14 +807,29 @@ class AccountManager:
             logger.error(f"Error getting OTP from database: {e}")
             return None
     
-    def logout_session_sync(self, session_id, user_id, otp_sessions_col, accounts_col, orders_col):
+    async def _logout_session_internal(self, session_id, user_id, otp_sessions_col, accounts_col, orders_col, session_string=None):
+        """Internal async logout method"""
+        try:
+            # Call the logout function
+            return await logout_session_async(
+                session_id, user_id, otp_sessions_col, accounts_col, orders_col, session_string
+            )
+            
+        except Exception as e:
+            logger.error(f"Internal logout error: {e}")
+            return False, str(e)
+
+    def logout_session_sync(self, session_id, user_id, otp_sessions_col, accounts_col, orders_col, session_string=None):
         """Sync wrapper to logout session"""
         try:
+            # Run async logout
             return self.async_manager.run_async(
-                logout_session_async(session_id, user_id, otp_sessions_col, accounts_col, orders_col)
+                self._logout_session_internal(
+                    session_id, user_id, otp_sessions_col, accounts_col, orders_col, session_string
+                )
             )
         except Exception as e:
-            logger.error(f"Logout error: {e}")
+            logger.error(f"Logout sync error: {e}")
             return False, str(e)
     
     def start_simple_monitoring_sync(self, session_string, session_id, max_wait_time=1800):
@@ -767,24 +841,6 @@ class AccountManager:
         except Exception as e:
             logger.error(f"Simple monitoring error: {e}")
             return None
-
-# -----------------------
-# MAIN OTP MONITORING FUNCTION (USED BY BOT) - FIXED
-# -----------------------
-async def continuous_otp_monitor(session_string, user_id, phone, session_id, max_wait_time=1800, 
-                                 api_id=6435225, api_hash="4e984ea35f854762dcde906dce426c2d", 
-                                 bot=None, otp_sessions_col=None, accounts_col=None):
-    """Main OTP monitoring function called by bot - MODIFIED: NO AUTOMATIC NOTIFICATIONS"""
-    try:
-        # Use simple monitoring instead of real-time monitoring
-        last_otp = await simple_otp_monitor(
-            session_string, session_id, max_wait_time,
-            api_id, api_hash
-        )
-        return [last_otp] if last_otp else []
-    except Exception as e:
-        logger.error(f"Continuous OTP monitor error: {e}")
-        return []
 
 # Export everything
 __all__ = [
