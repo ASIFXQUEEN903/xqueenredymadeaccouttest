@@ -1723,9 +1723,9 @@ def show_countries(chat_id, message_id=None):
     for country in countries:
         count = get_available_accounts_count(country['name'])
         markup.add(InlineKeyboardButton(
-            f"{country['name']} ({count}) - {format_currency(country['price'])}",
-            callback_data=f"country_{country['name'].lower().replace(' ', '_')}"
-        ))
+    f"{country['name']} ({count}) - {format_currency(country['price'])}",
+    callback_data=f"country_raw_{country['name']}"
+     ))
     
     markup.add(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
     
