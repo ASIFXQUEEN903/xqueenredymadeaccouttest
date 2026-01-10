@@ -275,10 +275,10 @@ def start(msg):
     
     ensure_user_exists(user_id, msg.from_user.first_name, msg.from_user.username, referred_by)
     
-    # Send single photo message with buttons
-    caption = """🥂 <b>Welcome To OTP Bot By Xqueen</b> 🥂
+    # Send single photo message with buttons and quoted caption
+    caption = """<blockquote>🥂 <b>Welcome To OTP Bot By Xqueen</b> 🥂</blockquote>
 
-<b>Features:</b>
+<blockquote><b>Features:</b>
 • Automatic OTPs 📍
 • Easy to Use 🥂🥂
 • 24/7 Support 👨‍🔧
@@ -291,7 +291,7 @@ def start(msg):
 4️⃣ Get Number & Login through Telegram X
 5️⃣ Receive OTP & You're Done ✅
 
-🚀 <b>Enjoy Fast Account Buying Experience!</b>"""
+🚀 <b>Enjoy Fast Account Buying Experience!</b></blockquote>"""
     
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -429,10 +429,6 @@ def handle_callbacks(call):
             account_id = data.split("_", 1)[1]
             process_purchase(user_id, account_id, call.message.chat.id, call.message.message_id, call.id)
         
-        elif data.startswith("complete_order_"):
-            session_id = data.split("_", 2)[2]
-            complete_order(user_id, session_id, call.message.chat.id, call.id)
-        
         elif data.startswith("logout_session_"):
             session_id = data.split("_", 2)[2]
             handle_logout_session(user_id, session_id, call.message.chat.id, call.id)
@@ -458,7 +454,7 @@ def handle_callbacks(call):
         elif data == "recharge_manual":
             try:
                 bot.edit_message_text(
-                    "💳 Enter recharge amount (minimum ₹10):",
+                    "💳 Enter recharge amount (minimum ₹1):",
                     call.message.chat.id,
                     call.message.message_id,
                     reply_markup=InlineKeyboardMarkup().add(
@@ -473,24 +469,73 @@ def handle_callbacks(call):
                     pass
                 bot.send_message(
                     call.message.chat.id,
-                    "💳 Enter recharge amount (minimum ₹10):",
+                    "💳 Enter recharge amount (minimum ₹1):",
                     reply_markup=InlineKeyboardMarkup().add(
                         InlineKeyboardButton("❌ Cancel", callback_data="back_to_menu")
                     )
                 )
                 bot.register_next_step_handler(call.message, process_recharge_amount_manual)
         
-        elif data.startswith("approve_rech_"):
+        elif data.startswith("approve_rech|") or data.startswith("cancel_rech|"):
+            # Manual recharge approval
             if is_admin(user_id):
-                recharge_id = data.split("_", 2)[2]
-                approve_recharge(recharge_id, call.message.chat.id, call.message.message_id)
-            else:
-                bot.answer_callback_query(call.id, "❌ Unauthorized", show_alert=True)
-        
-        elif data.startswith("reject_rech_"):
-            if is_admin(user_id):
-                recharge_id = data.split("_", 2)[2]
-                reject_recharge(recharge_id, call.message.chat.id)
+                parts = data.split("|")
+                action = parts[0]
+                req_id = parts[1] if len(parts) > 1 else None
+                req = recharges_col.find_one({"req_id": req_id}) if req_id else None
+                
+                if not req:
+                    bot.answer_callback_query(call.id, "❌ Request not found", show_alert=True)
+                    return
+                
+                user_target = req.get("user_id")
+                amount = float(req.get("amount", 0))
+                
+                if action == "approve_rech":
+                    add_balance(user_target, amount)
+                    recharges_col.update_one(
+                        {"req_id": req_id},
+                        {"$set": {"status": "approved", "processed_at": datetime.utcnow(), "processed_by": ADMIN_ID}}
+                    )
+                    bot.answer_callback_query(call.id, "✅ Recharge approved", show_alert=True)
+                    
+                    # Check for referral commission
+                    user_data = users_col.find_one({"user_id": user_target})
+                    if user_data and user_data.get("referred_by"):
+                        add_referral_commission(user_data["referred_by"], amount, req)
+                    
+                    kb = InlineKeyboardMarkup()
+                    kb.add(InlineKeyboardButton("🛒 Buy Account Now", callback_data="buy_account"))
+                    
+                    # Delete admin message
+                    try:
+                        bot.delete_message(call.message.chat.id, call.message.message_id)
+                    except:
+                        pass
+                    
+                    bot.send_message(
+                        user_target,
+                        f"✅ Your recharge of {format_currency(amount)} has been approved and added to your wallet.\n\n"
+                        f"💰 <b>New Balance: {format_currency(get_balance(user_target))}</b>\n\n"
+                        f"Click below to buy accounts:",
+                        parse_mode="HTML",
+                        reply_markup=kb
+                    )
+                
+                else:
+                    recharges_col.update_one(
+                        {"req_id": req_id},
+                        {"$set": {"status": "cancelled", "processed_at": datetime.utcnow(), "processed_by": ADMIN_ID}}
+                    )
+                    bot.answer_callback_query(call.id, "❌ Recharge cancelled", show_alert=True)
+                    
+                    # Delete admin message
+                    try:
+                        bot.delete_message(call.message.chat.id, call.message.message_id)
+                    except:
+                        pass
+                    
+                    bot.send_message(user_target, f"❌ Your recharge of {format_currency(amount)} was not received.")
             else:
                 bot.answer_callback_query(call.id, "❌ Unauthorized", show_alert=True)
         
@@ -633,76 +678,6 @@ def handle_callbacks(call):
             else:
                 bot.answer_callback_query(call.id, "❌ Unauthorized", show_alert=True)
         
-        elif data.startswith("approve_rech|") or data.startswith("cancel_rech|"):
-            # Manual recharge approval
-            if is_admin(user_id):
-                parts = data.split("|")
-                action = parts[0]
-                req_id = parts[1] if len(parts) > 1 else None
-                req = recharges_col.find_one({"req_id": req_id}) if req_id else None
-                
-                if not req:
-                    bot.answer_callback_query(call.id, "❌ Request not found", show_alert=True)
-                    bot.send_message(call.message.chat.id, "⚠️ Recharge request not found or already processed.")
-                    return
-                
-                user_target = req.get("user_id")
-                amount = float(req.get("amount", 0))
-                
-                if action == "approve_rech":
-                    add_balance(user_target, amount)
-                    recharges_col.update_one(
-                        {"req_id": req_id},
-                        {"$set": {"status": "approved", "processed_at": datetime.utcnow(), "processed_by": ADMIN_ID}}
-                    )
-                    bot.answer_callback_query(call.id, "✅ Recharge approved", show_alert=True)
-                    
-                    # Check for referral commission
-                    user_data = users_col.find_one({"user_id": user_target})
-                    if user_data and user_data.get("referred_by"):
-                        add_referral_commission(user_data["referred_by"], amount, req)
-                    
-                    kb = InlineKeyboardMarkup()
-                    kb.add(InlineKeyboardButton("🛒 Buy Account Now", callback_data="buy_account"))
-                    
-                    try:
-                        bot.edit_message_text(
-                            f"✅ Payment approved for user {user_target}",
-                            call.message.chat.id,
-                            call.message.message_id
-                        )
-                    except:
-                        pass
-                    
-                    bot.send_message(
-                        user_target,
-                        f"✅ Your recharge of {format_currency(amount)} has been approved and added to your wallet.\n\n"
-                        f"💰 <b>New Balance: {format_currency(get_balance(user_target))}</b>\n\n"
-                        f"Click below to buy accounts:",
-                        parse_mode="HTML",
-                        reply_markup=kb
-                    )
-                
-                else:
-                    recharges_col.update_one(
-                        {"req_id": req_id},
-                        {"$set": {"status": "cancelled", "processed_at": datetime.utcnow(), "processed_by": ADMIN_ID}}
-                    )
-                    bot.answer_callback_query(call.id, "❌ Recharge cancelled", show_alert=True)
-                    
-                    try:
-                        bot.edit_message_text(
-                            f"❌ Payment cancelled for user {user_target}",
-                            call.message.chat.id,
-                            call.message.message_id
-                        )
-                    except:
-                        pass
-                    
-                    bot.send_message(user_target, f"❌ Your recharge of {format_currency(amount)} was not received.")
-            else:
-                bot.answer_callback_query(call.id, "❌ Unauthorized", show_alert=True)
-        
         else:
             bot.answer_callback_query(call.id, "❌ Unknown action", show_alert=True)
     
@@ -728,6 +703,30 @@ def show_main_menu(chat_id):
         )
         return
     
+    # Delete existing message and send fresh main menu
+    try:
+        bot.delete_message(chat_id, chat_id)
+    except:
+        pass
+    
+    # Send fresh start message with image
+    caption = """<blockquote>🥂 <b>Welcome To OTP Bot By Xqueen</b> 🥂</blockquote>
+
+<blockquote><b>Features:</b>
+• Automatic OTPs 📍
+• Easy to Use 🥂🥂
+• 24/7 Support 👨‍🔧
+• Instant Payment Approvals 🧾
+
+<b>How to use:</b>
+1️⃣ Recharge
+2️⃣ Select Country
+3️⃣ Buy Account
+4️⃣ Get Number & Login through Telegram X
+5️⃣ Receive OTP & You're Done ✅
+
+🚀 <b>Enjoy Fast Account Buying Experience!</b></blockquote>"""
+    
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("🛒 Buy Account", callback_data="buy_account"),
@@ -744,13 +743,22 @@ def show_main_menu(chat_id):
     if is_admin(user_id):
         markup.add(InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel"))
     
-    bot.send_message(
-        chat_id,
-        "🤖 **Welcome to OTP Bot**\n\n"
-        "Select an option:",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
+    try:
+        bot.send_photo(
+            chat_id,
+            "https://files.catbox.moe/7s0nqh.jpg",
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Error sending main menu: {e}")
+        bot.send_message(
+            chat_id,
+            caption,
+            parse_mode="HTML",
+            reply_markup=markup
+        )
 
 def show_country_details(user_id, country_name, chat_id, message_id, callback_id):
     """Show country details page"""
@@ -792,7 +800,7 @@ def show_country_details(user_id, country_name, chat_id, message_id, callback_id
                 callback_data=f"buy_{accounts[0]['_id']}" if accounts else "out_of_stock"
             ))
         else:
-            # No accounts available
+            # No accounts available - still show buy button with out of stock alert
             markup.add(InlineKeyboardButton(
                 "🛒 Buy Account",
                 callback_data="out_of_stock"
@@ -1708,7 +1716,7 @@ def broadcast_thread(source_msg, text, is_photo, is_video, is_document):
 # -----------------------
 # COUNTRY SELECTION FUNCTIONS
 # -----------------------
-def show_countries(chat_id, message_id=None):
+def show_countries(chat_id):
     countries = get_all_countries()
     
     if not countries:
@@ -1722,7 +1730,7 @@ def show_countries(chat_id, message_id=None):
     text = "🌍 **Select Country**\n\nChoose your country:"
     markup = InlineKeyboardMarkup(row_width=2)
     
-    # Create buttons in 2x2 grid (4 countries per row)
+    # Create buttons in 2x2 grid (2 countries per row)
     row = []
     for i, country in enumerate(countries):
         row.append(InlineKeyboardButton(
@@ -1776,25 +1784,35 @@ def process_recharge_amount_manual(msg):
     """Process manual recharge amount"""
     try:
         amount = float(msg.text)
-        if amount < 10:
-            bot.send_message(msg.chat.id, "❌ Minimum recharge is ₹10. Enter amount again:")
+        if amount < 1:
+            bot.send_message(msg.chat.id, "❌ Minimum recharge is ₹1. Enter amount again:")
             bot.register_next_step_handler(msg, process_recharge_amount_manual)
             return
         
         user_id = msg.from_user.id
         
-        # Ask for screenshot or UTR
-        bot.send_message(
+        # Show QR code and payment details
+        caption = f"""<blockquote>💳 <b>Payment Details</b>
+
+💰 Amount: {format_currency(amount)}
+📱 UPI ID: <code>amit.singh903@paytm</code>
+👤 Name: Amit Singh</blockquote>
+
+<blockquote>📋 <b>Instructions:</b>
+1. Scan QR code OR send {format_currency(amount)} to above UPI
+2. Send screenshot OR 12-digit UTR here
+3. Payment will be verified manually</blockquote>"""
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_menu"))
+        
+        # Send QR code image
+        bot.send_photo(
             msg.chat.id,
-            f"💳 **Payment Details**\n\n"
-            f"Amount: {format_currency(amount)}\n"
-            f"UPI ID: `amit.singh903@paytm`\n"
-            f"Name: Amit Singh\n\n"
-            f"**Instructions:**\n"
-            f"1. Send {format_currency(amount)} to above UPI\n"
-            f"2. Send screenshot OR 12-digit UTR here\n\n"
-            f"Payment will be verified manually.",
-            parse_mode="Markdown"
+            "https://files.catbox.moe/8rpxez.jpg",
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=markup
         )
         
         # Store recharge data
@@ -2211,130 +2229,6 @@ def chat_handler(msg):
     # Handle manual payment proof (already handled above)
     
     bot.send_message(user_id, "⚠️ Please use /start to begin or press buttons from the menu.")
-
-# -----------------------
-# OTHER FUNCTIONS
-# -----------------------
-def complete_order(user_id, session_id, chat_id, callback_id):
-    """Mark order as completed when user clicks Complete button"""
-    try:
-        # Check if at least one OTP was received
-        session_data = otp_sessions_col.find_one({"session_id": session_id})
-        
-        if not session_data:
-            bot.answer_callback_query(callback_id, "❌ Order session not found", show_alert=True)
-            return
-        
-        if not session_data.get("otp_code"):
-            bot.answer_callback_query(
-                callback_id,
-                "❌ No OTP received yet!\n\nPlease wait for at least one OTP before completing the order.",
-                show_alert=True
-            )
-            return
-        
-        # Update OTP session
-        otp_sessions_col.update_one(
-            {"session_id": session_id},
-            {"$set": {
-                "status": "completed",
-                "completed_at": datetime.utcnow(),
-                "completed_by_user": True
-            }}
-        )
-        
-        # Update order status
-        orders_col.update_one(
-            {"session_id": session_id},
-            {"$set": {
-                "status": "completed",
-                "completed_at": datetime.utcnow(),
-                "user_completed": True
-            }}
-        )
-        
-        bot.answer_callback_query(callback_id, "✅ Order marked as completed!", show_alert=True)
-        
-        # Send confirmation message
-        bot.send_message(
-            chat_id,
-            "🎉 **Order Completed Successfully!**\n\n"
-            "✅ Your account has been successfully activated!\n"
-            "📦 Order marked as completed.\n\n"
-            "Thank you for your purchase! 🎊"
-        )
-    
-    except Exception as e:
-        logger.error(f"Complete order error: {e}")
-        bot.answer_callback_query(callback_id, "❌ Error completing order", show_alert=True)
-
-def approve_recharge(recharge_id, admin_chat_id, message_id):
-    try:
-        recharge = recharges_col.find_one({"_id": ObjectId(recharge_id)})
-        if not recharge:
-            bot.send_message(admin_chat_id, "❌ Recharge not found")
-            return
-        
-        user_id = recharge['user_id']
-        amount = recharge['amount']
-        
-        add_balance(user_id, amount)
-        recharges_col.update_one(
-            {"_id": ObjectId(recharge_id)},
-            {"$set": {"status": "approved", "approved_at": datetime.utcnow(), "approved_by": ADMIN_ID}}
-        )
-        
-        # Check for referral commission
-        user_data = users_col.find_one({"user_id": user_id})
-        if user_data and user_data.get("referred_by"):
-            add_referral_commission(user_data["referred_by"], amount, recharge)
-        
-        bot.send_message(
-            user_id,
-            f"✅ Recharge Approved!\n\n"
-            f"Amount: {format_currency(amount)}\n"
-            f"New Balance: {format_currency(get_balance(user_id))}\n\n"
-            f"Thank you for your payment! 🎉"
-        )
-        
-        try:
-            bot.edit_message_caption(
-                chat_id=admin_chat_id,
-                message_id=message_id,
-                caption=f"✅ Recharge Approved\n\n"
-                f"User: {user_id}\n"
-                f"Amount: {format_currency(amount)}\n"
-                f"Balance Added: {format_currency(get_balance(user_id))}"
-            )
-        except:
-            pass
-    
-    except Exception as e:
-        logger.error(f"Approve recharge error: {e}")
-        try:
-            bot.send_message(admin_chat_id, f"❌ Error: {e}")
-        except:
-            pass
-
-def reject_recharge(recharge_id, admin_chat_id):
-    try:
-        recharge = recharges_col.find_one({"_id": ObjectId(recharge_id)})
-        if recharge:
-            recharges_col.update_one(
-                {"_id": ObjectId(recharge_id)},
-                {"$set": {"status": "rejected", "rejected_at": datetime.utcnow()}}
-            )
-            
-            bot.send_message(
-                recharge['user_id'],
-                f"❌ Recharge Rejected\n\n"
-                f"Amount: {format_currency(recharge['amount'])}\n"
-                f"Contact support if this is a mistake."
-            )
-            bot.send_message(admin_chat_id, f"❌ Recharge {recharge_id} rejected")
-    
-    except Exception as e:
-        logger.error(f"Reject recharge error: {e}")
 
 # -----------------------
 # RUN BOT
